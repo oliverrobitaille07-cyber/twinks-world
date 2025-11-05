@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Twinkie-Pepsi Open World — Jeff's Hustle</title>
+    <style>
+        html, body { height: 100%; margin: 0; background: #111; color: #eee; font-family: Arial, sans-serif; }
+        #gameWrap { display:flex; gap:16px; align-items:flex-start; padding:12px; }
+        canvas { background: #2b2b2b; border: 4px solid #444; box-shadow: 0 0 12px rgba(0,0,0,0.8); }
+        #hud { width: 300px; }
+        .panel { background: #151515; padding: 12px; border-radius: 8px; margin-bottom: 12px; border: 1px solid #333; }
+        h1 { margin: 0 0 8px 0; font-size: 18px; }
+        .stat { margin:6px 0; }
+        #log { height: 200px; overflow:auto; background:#0f0f0f; padding:8px; border-radius:6px; border:1px solid #222; }
+        .btn { padding:8px 10px; background:#2b7; color:#042; border-radius:6px; cursor:pointer; display:inline-block; margin-top:8px; }
+        .small { font-size: 13px; color:#aaa }
+        .hint { color:#aab; font-size:13px; margin-top:6px }
+    </style>
+</head>
+<body>
+    <div id="gameWrap">
+        <canvas id="game" width="900" height="600"></canvas>
+
+        <div id="hud">
+            <div class="panel">
+                <h1>Jeff's Hustle</h1>
+                <div class="stat">Name: <strong>Jeff</strong></div>
+                <div class="stat">Money: $<span id="money">10.00</span></div>
+                <div class="stat">Twinkies: <span id="twinkies">0</span></div>
+                <div class="stat">Pepsi: <span id="pepsi">0</span></div>
+                <div class="stat small">Controls: Arrow keys / WASD to move, E to interact, I to toggle instructions</div>
+            </div>
+
+            <div class="panel">
+                <h2>Locations</h2>
+                <div class="small">Store (Green): Buy Twinkies ($2 each)</div>
+                <div class="small">Secret Alley (Purple): Buy Pepsi ($1 each)</div>
+                <div class="small">City: Walk around and press E on people to sell</div>
+            </div>
+
+            <div class="panel">
+                <h2>Upgrades</h2>
+                <div class="small">Purchased: <span id="upgradesCount">0</span> / 167</div>
+                <div class="small">Map Expansions Purchased: <span id="mapCount">0</span> / 5</div>
+                <div style="margin-top:8px;"><span class="btn" onclick="openUpgrades()">Open Upgrades</span></div>
+                <div class="small" style="margin-top:8px;">Unlocked Product Tier: <span id="tier">1</span></div>
+            </div>
+
+            <div class="panel">
+                <h2>Transaction Log</h2>
+                <div id="log"></div>
+                <div class="hint">Tip: Sell Pepsi for higher profit. Some people buy only Twinkies.</div>
+            </div>
+
+            <div class="panel">
+                <div class="small">Game created as a tiny open-world prototype. No save. Refresh to restart.</div>
+                <div style="margin-top:8px;"><span class="btn" onclick="location.reload()">Restart</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    // ---------- Upgrade system setup ----------
+    const UPGRADES_TOTAL = 167;
+    const MAP_EXPANSIONS_TOTAL = 5;
+    let purchasedUpgrades = new Set();
+    let mapExpansionsPurchased = 0;
+    let unlockedTier = 1; // product tier unlocked by map expansions / upgrades
+
+    // base economy values (will be modified by upgrades)
+    const basePrices = {
+        buyTwinkie: 2.00,
+        sellTwinkie: 2.50,
+        buyPepsi: 1.00,
+        sellPepsi: 1.75
+    };
+
+    const modifiers = {
+        buyTwinkieMultiplier: 1.0,
+        sellTwinkieMultiplier: 1.0,
+        buyPepsiMultiplier: 1.0,
+        sellPepsiMultiplier: 1.0,
+        inventoryCapacity: 999
+    };
+
+    // generate upgrades programmatically (162 general upgrades + 5 map expansions = 167)
+    const upgrades = [];
+    // create general upgrades that tweak economy or capacity
+    for (let i = 1; i <= 162; i++) {
+        const cost = Math.round(8 * Math.pow(1.09, i));
+        const typeRoll = i % 6;
+        let effect;
+        let name;
+        if (typeRoll === 0) { name = `Buy Discount (Twinkie) ${i}`; effect = { kind: 'buyTwinkieMultiplier', value: 0.995 }; }
+        else if (typeRoll === 1) { name = `Sell Bonus (Twinkie) ${i}`; effect = { kind: 'sellTwinkieMultiplier', value: 1.01 }; }
+        else if (typeRoll === 2) { name = `Buy Discount (Pepsi) ${i}`; effect = { kind: 'buyPepsiMultiplier', value: 0.995 }; }
+        else if (typeRoll === 3) { name = `Sell Bonus (Pepsi) ${i}`; effect = { kind: 'sellPepsiMultiplier', value: 1.01 }; }
+        else if (typeRoll === 4) { name = `Inventory Expansion ${i}`; effect = { kind: 'inventoryCapacity', value: 1.02 }; }
+        else { name = `Customer Demand ${i}`; effect = { kind: 'npcPriceFactor', value: 1.005 }; }
+        upgrades.push({ id: i, name, cost, effect, purchased: false });
+    }
+    // add 5 map expansions as special upgrades with higher costs and tier unlocking
+    for (let m = 1; m <= MAP_EXPANSIONS_TOTAL; m++) {
+        const id = 162 + m;
+        const cost = Math.round(500 * Math.pow(2.2, m-1));
+        const name = `Map Expansion ${m}`;
+        const effect = { kind: 'mapExpansion', value: 1 }; // each increases tier and NPCs
+        upgrades.push({ id, name, cost, effect, purchased: false, isMap: true });
+    }
+
+    // fast lookup
+    const upgradesById = new Map(upgrades.map(u => [u.id, u]));
+
+    // upgrades UI
+    function openUpgrades() {
+        // create modal if not present
+        let modal = document.getElementById('upgradesModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'upgradesModal';
+            Object.assign(modal.style, { position:'fixed', left:0, top:0, right:0, bottom:0, background:'rgba(0,0,0,0.7)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:9999 });
+            modal.innerHTML = `
+                <div style="width:900px; max-height:80%; overflow:auto; background:#111; padding:14px; border-radius:8px; border:1px solid #333; color:#eee;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h2 style="margin:0">Upgrades</h2>
+                        <div><button onclick="closeUpgrades()" style="padding:6px 10px">Close</button></div>
+                    </div>
+                    <div id="upgradesList" style="display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; margin-top:12px;"></div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+        renderUpgrades();
+    }
+    function closeUpgrades() { const m = document.getElementById('upgradesModal'); if (m) m.remove(); }
+
+    function renderUpgrades() {
+        const container = document.getElementById('upgradesList');
+        container.innerHTML = '';
+        for (const u of upgrades) {
+            const card = document.createElement('div');
+            card.style.background = '#1b1b1b';
+            card.style.padding = '8px';
+            card.style.border = '1px solid #333';
+            card.style.borderRadius = '6px';
+            const title = document.createElement('div'); title.textContent = u.name; title.style.fontWeight = '600';
+            const cost = document.createElement('div'); cost.textContent = '$' + u.cost.toFixed(2); cost.style.color = '#9cf';
+            const desc = document.createElement('div'); desc.className = 'small'; desc.style.marginTop = '6px';
+            if (u.isMap) desc.textContent = 'Unlocks new map area, increases NPCs and product tier.';
+            else desc.textContent = `Effect: ${u.effect.kind} ${u.effect.value}`;
+            const btn = document.createElement('button'); btn.textContent = u.purchased ? 'Purchased' : 'Buy';
+            btn.style.marginTop = '8px'; btn.disabled = u.purchased;
+            btn.onclick = ()=>{ buyUpgrade(u.id); renderUpgrades(); };
+            card.appendChild(title); card.appendChild(cost); card.appendChild(desc); card.appendChild(btn);
+            container.appendChild(card);
+        }
+    }
+
+    function buyUpgrade(id) {
+        const u = upgradesById.get(id);
+        if (!u) return;
+        if (u.purchased) { addLog('Upgrade already purchased.'); return; }
+        if (money < u.cost) { addLog('Not enough money to buy upgrade.'); return; }
+        money -= u.cost; u.purchased = true; purchasedUpgrades.add(u.id);
+        // apply effect
+        const e = u.effect;
+        if (e.kind === 'buyTwinkieMultiplier') modifiers.buyTwinkieMultiplier *= e.value;
+        else if (e.kind === 'sellTwinkieMultiplier') modifiers.sellTwinkieMultiplier *= e.value;
+        else if (e.kind === 'buyPepsiMultiplier') modifiers.buyPepsiMultiplier *= e.value;
+        else if (e.kind === 'sellPepsiMultiplier') modifiers.sellPepsiMultiplier *= e.value;
+        else if (e.kind === 'inventoryCapacity') modifiers.inventoryCapacity = Math.floor(modifiers.inventoryCapacity * e.value);
+        else if (e.kind === 'npcPriceFactor') {
+            // boost NPC price factor globally (affects how much they pay)
+            for (const n of npcs) n.priceFactor *= e.value;
+        }
+        else if (e.kind === 'mapExpansion') {
+            mapExpansionsPurchased += 1;
+            unlockedTier += 1;
+            // increase NPC count and chances for higher paying customers
+            for (let i=0;i<8;i++) spawnExtraNPC();
+            addLog(`Map Expansion purchased! Unlocked product tier ${unlockedTier}.`);
+        }
+        updateUI();
+        addLog(`Purchased upgrade: ${u.name} for $${u.cost.toFixed(2)}`);
+    }
+
+    function spawnExtraNPC() {
+        const npc = {
+            x: Math.random()*(W-40)+20,
+            y: Math.random()*(H-40)+20,
+            w: 14, h: 22,
+            vx: (Math.random()-0.5)*0.7,
+            vy: (Math.random()-0.5)*0.7,
+            wants: Math.random() < Math.min(0.8, 0.45 + unlockedTier*0.05) ? 'twinkie' : 'pepsi',
+            priceFactor: 0.95 + Math.random()*0.5 + unlockedTier*0.02
+        };
+        npcs.push(npc);
+    }
+
+    // Override buy/sell functions to use modifiers and capacity
+    function buyTwinkies() {
+        const cost = basePrices.buyTwinkie * modifiers.buyTwinkieMultiplier;
+        if (money >= cost && twinkies < modifiers.inventoryCapacity) {
+            money -= cost; twinkies += 1; updateUI(); addLog(`Bought 1 Twinkie for $${cost.toFixed(2)}`);
+        } else if (money < cost) addLog('Not enough money to buy Twinkies.');
+        else addLog('Inventory full.');
+    }
+    function buyPepsi() {
+        const cost = basePrices.buyPepsi * modifiers.buyPepsiMultiplier;
+        if (money >= cost && pepsi < modifiers.inventoryCapacity) {
+            money -= cost; pepsi += 1; updateUI(); addLog(`Bought 1 Pepsi for $${cost.toFixed(2)}`);
+        } else if (money < cost) addLog('Not enough money to buy Pepsi.');
+        else addLog('Inventory full.');
+    }
+    // patch sell functions used elsewhere
+    function sellTwinkies() {
+        if (twinkies > 0) {
+            const price = basePrices.sellTwinkie * modifiers.sellTwinkieMultiplier;
+            money += price; twinkies -= 1; updateUI(); addLog(`Sold 1 Twinkie for $${price.toFixed(2)}`);
+        } else addLog('No Twinkies to sell!');
+    }
+    function sellPepsi() {
+        if (pepsi > 0) {
+            const price = basePrices.sellPepsi * modifiers.sellPepsiMultiplier;
+            money += price; pepsi -= 1; updateUI(); addLog(`Sold 1 Pepsi for $${price.toFixed(2)}`);
+        } else addLog('No Pepsi to sell!');
+    }
+
+    // wire new buy/sell buttons (if present in UI) — keep names for external use
+    window.buyTwinkies = buyTwinkies;
+    window.buyPepsi = buyPepsi;
+    window.sellTwinkies = sellTwinkies;
+    window.sellPepsi = sellPepsi;
+
+    // update UI additions
+    function updateUI() {
+        moneyEl.textContent = money.toFixed(2);
+        twEl.textContent = twinkies;
+        peEl.textContent = pepsi;
+        document.getElementById('upgradesCount').textContent = purchasedUpgrades.size;
+        document.getElementById('mapCount').textContent = mapExpansionsPurchased;
+        document.getElementById('tier').textContent = unlockedTier;
+    }
+
+    // expose closing hook
+    window.openUpgrades = openUpgrades;
+    window.closeUpgrades = closeUpgrades;
+    // ---------- End upgrade system setup ----------
+    // Simple open world prototype where Jeff buys and sells Twinkies/Pepsi
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+
+    // Player
+    const player = { x: 100, y: 100, w: 20, h: 28, speed: 2.6 };
+    const name = 'Jeff';
+
+    // World features
+    const store = { x: 80, y: 80, w: 120, h: 120, color: 'green' };
+    const alley = { x: 700, y: 430, w: 140, h: 110, color: 'purple' };
+
+    // Inventory & economy
+    let money = 10.00;
+    let twinkies = 0;
+    let pepsi = 0;
+    const prices = {
+        buyTwinkie: 2.00,
+        sellTwinkie: 2.50,
+        buyPepsi: 1.00,
+        sellPepsi: 1.75
+    };
+
+    // NPCs (people to sell to)
+    const npcs = [];
+    const NPC_COUNT = 10;
+
+    // Input
+    const keys = {};
+
+    // UI refs
+    const moneyEl = document.getElementById('money');
+    const twEl = document.getElementById('twinkies');
+    const peEl = document.getElementById('pepsi');
+    const logEl = document.getElementById('log');
+
+    function addLog(t) {
+        const p = document.createElement('div');
+        p.textContent = (new Date()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'}) + ' - ' + t;
+        logEl.prepend(p);
+    }
+
+    function spawnNPCs() {
+        for (let i=0;i<NPC_COUNT;i++) {
+            const npc = {
+                x: Math.random()*(W-40)+20,
+                y: Math.random()*(H-40)+20,
+                w: 14, h: 22,
+                vx: (Math.random()-0.5)*0.7,
+                vy: (Math.random()-0.5)*0.7,
+                wants: Math.random() < 0.6 ? 'twinkie' : (Math.random() < 0.7 ? 'pepsi' : 'either'),
+                priceFactor: 0.9 + Math.random()*0.5 // how much they'll pay vs sell price
+            };
+            npcs.push(npc);
+        }
+    }
+
+    spawnNPCs();
+
+    function update(dt) {
+        // movement
+        let vx = 0, vy = 0;
+        if (keys['ArrowLeft'] || keys['a']) vx -= 1;
+        if (keys['ArrowRight'] || keys['d']) vx += 1;
+        if (keys['ArrowUp'] || keys['w']) vy -= 1;
+        if (keys['ArrowDown'] || keys['s']) vy += 1;
+        const len = Math.hypot(vx, vy);
+        if (len > 0) { vx /= len; vy /= len; }
+        player.x += vx * player.speed * dt;
+        player.y += vy * player.speed * dt;
+        player.x = Math.max(0, Math.min(W - player.w, player.x));
+        player.y = Math.max(0, Math.min(H - player.h, player.y));
+
+        // NPC movement simple wander
+        for (const n of npcs) {
+            n.x += n.vx * dt;
+            n.y += n.vy * dt;
+            if (n.x < 10 || n.x > W-10) n.vx *= -1;
+            if (n.y < 10 || n.y > H-10) n.vy *= -1;
+            // small random jitter
+            if (Math.random() < 0.005) n.vx += (Math.random()-0.5)*0.6;
+            if (Math.random() < 0.005) n.vy += (Math.random()-0.5)*0.6;
+            n.vx = Math.max(-1, Math.min(1, n.vx));
+            n.vy = Math.max(-1, Math.min(1, n.vy));
+        }
+
+        // interactions handled via key press E
+    }
+
+    function draw() {
+        // clear
+        ctx.clearRect(0,0,W,H);
+
+        // draw city ground (simple grid)
+        ctx.fillStyle = '#3a3a3a';
+        ctx.fillRect(0,0,W,H);
+
+        // store
+        ctx.fillStyle = store.color;
+        ctx.fillRect(store.x, store.y, store.w, store.h);
+        ctx.fillStyle = 'white';
+        ctx.font = '14px Arial';
+        ctx.fillText('STORE', store.x+10, store.y+20);
+        ctx.fillText('Buy Twinkies', store.x+8, store.y+40);
+
+        // alley
+        ctx.fillStyle = alley.color;
+        ctx.fillRect(alley.x, alley.y, alley.w, alley.h);
+        ctx.fillStyle = 'white';
+        ctx.fillText('SECRET ALLEY', alley.x+8, alley.y+20);
+        ctx.fillText('Buy Pepsi', alley.x+8, alley.y+40);
+
+        // NPCs
+        for (const n of npcs) {
+            ctx.fillStyle = '#ffcc99';
+            ctx.fillRect(n.x - n.w/2, n.y - n.h, n.w, n.h);
+            ctx.fillStyle = '#222';
+            ctx.font = '11px Arial';
+            const wantLabel = n.wants === 'either' ? '??' : (n.wants === 'twinkie' ? 'T' : 'P');
+            ctx.fillText(wantLabel, n.x-4, n.y-6);
+        }
+
+        // player
+        ctx.fillStyle = '#59f';
+        ctx.fillRect(player.x, player.y, player.w, player.h);
+        ctx.fillStyle = '#fff';
+        ctx.font = '12px Arial';
+        ctx.fillText(name, player.x-4, player.y-6);
+
+        // proximity hints
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(6, H-36, 300, 28);
+        ctx.fillStyle = '#ddd';
+        ctx.font = '13px Arial';
+
+        // show interactive prompt if near
+        const nearStore = rectIntersect(player, store);
+        const nearAlley = rectIntersect(player, alley);
+        let nearNPC = null;
+        for (const n of npcs) {
+            if (pointRect(player.x + player.w/2, player.y + player.h/2, n.x - n.w/2, n.y - n.h, n.w, n.h)) { nearNPC = n; break; }
+        }
+        let hint = 'Move around. Press E to interact.';
+        if (nearStore) hint = 'Press E to BUY Twinkies ($2) at the STORE.';
+        else if (nearAlley) hint = 'Press E to BUY Pepsi ($1) in the SECRET ALLEY.';
+        else if (nearNPC) hint = `Press E to TALK / SELL to person (wants: ${nearNPC.wants}).`;
+        ctx.fillText(hint, 12, H-18);
+    }
+
+    function rectIntersect(a, b) {
+        return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y || a.y > b.y + b.h);
+    }
+    function pointRect(px, py, rx, ry, rw, rh) {
+        return px >= rx && px <= rx+rw && py >= ry && py <= ry+rh;
+    }
+
+    // Interaction logic when E pressed
+    function tryInteract() {
+        if (rectIntersect(player, store)) {
+            // buy twinkie
+            if (money >= prices.buyTwinkie) {
+                money -= prices.buyTwinkie; twinkies += 1; updateUI(); addLog('Bought 1 Twinkie for $' + prices.buyTwinkie.toFixed(2));
+            } else addLog('Not enough money to buy a Twinkie.');
+            return;
+        }
+        if (rectIntersect(player, alley)) {
+            // buy pepsi
+            if (money >= prices.buyPepsi) {
+                money -= prices.buyPepsi; pepsi += 1; updateUI(); addLog('Bought 1 Pepsi for $' + prices.buyPepsi.toFixed(2));
+            } else addLog('Not enough money to buy a Pepsi.');
+            return;
+        }
+        // check NPCs
+        for (let i=0;i<npcs.length;i++) {
+            const n = npcs[i];
+            if (pointRect(player.x + player.w/2, player.y + player.h/2, n.x - n.w/2, n.y - n.h, n.w, n.h)) {
+                // attempt sale
+                if ((n.wants === 'twinkie' || n.wants === 'either') && twinkies > 0) {
+                    const price = prices.sellTwinkie * n.priceFactor;
+                    money += price; twinkies -= 1; updateUI(); addLog('Sold 1 Twinkie to person for $' + price.toFixed(2));
+                    // person happy => may leave or change wants
+                    if (Math.random() < 0.25) npcs.splice(i,1);
+                    return;
+                }
+                if ((n.wants === 'pepsi' || n.wants === 'either') && pepsi > 0) {
+                    const price = prices.sellPepsi * n.priceFactor;
+                    money += price; pepsi -= 1; updateUI(); addLog('Sold 1 Pepsi to person for $' + price.toFixed(2));
+                    if (Math.random() < 0.35) npcs.splice(i,1);
+                    return;
+                }
+                // if nothing to sell
+                addLog('Person not interested or you have nothing they want.');
+                return;
+            }
+        }
+        addLog('Nothing to interact with here.');
+    }
+
+    function updateUI() {
+        moneyEl.textContent = money.toFixed(2);
+        twEl.textContent = twinkies;
+        peEl.textContent = pepsi;
+    }
+
+    // Keyboard
+    window.addEventListener('keydown', (e)=>{ keys[e.key] = true; if (e.key === 'e' || e.key === 'E') { tryInteract(); } });
+    window.addEventListener('keyup', (e)=>{ keys[e.key] = false; });
+
+    // Game loop
+    let last = performance.now();
+    function loop(t) {
+        const dt = Math.min(40, t - last) / 16; // normalized
+        update(dt);
+        draw();
+        last = t;
+        requestAnimationFrame(loop);
+    }
+
+    // initial UI
+    updateUI();
+    addLog('Welcome Jeff! Start by buying Twinkies at the green store or explore for customers.');
+    requestAnimationFrame(loop);
+    </script>
+</body>
+</html>
