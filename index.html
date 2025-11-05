@@ -80,23 +80,27 @@
         sellTwinkieMultiplier: 1.0,
         buyPepsiMultiplier: 1.0,
         sellPepsiMultiplier: 1.0,
-        inventoryCapacity: 999
+        inventoryCapacity: 999,
+        moneyMultiplier: 1.0,
+        npcBaseMultiplier: 1.0
     };
 
     // generate upgrades programmatically (162 general upgrades + 5 map expansions = 167)
     const upgrades = [];
     // create general upgrades that tweak economy or capacity
     for (let i = 1; i <= 162; i++) {
-        const cost = Math.round(8 * Math.pow(1.09, i));
-        const typeRoll = i % 6;
+        const cost = Math.round(12 * Math.pow(1.095, i));
+        const typeRoll = i % 7;
         let effect;
         let name;
-        if (typeRoll === 0) { name = `Buy Discount (Twinkie) ${i}`; effect = { kind: 'buyTwinkieMultiplier', value: 0.995 }; }
-        else if (typeRoll === 1) { name = `Sell Bonus (Twinkie) ${i}`; effect = { kind: 'sellTwinkieMultiplier', value: 1.01 }; }
-        else if (typeRoll === 2) { name = `Buy Discount (Pepsi) ${i}`; effect = { kind: 'buyPepsiMultiplier', value: 0.995 }; }
-        else if (typeRoll === 3) { name = `Sell Bonus (Pepsi) ${i}`; effect = { kind: 'sellPepsiMultiplier', value: 1.01 }; }
-        else if (typeRoll === 4) { name = `Inventory Expansion ${i}`; effect = { kind: 'inventoryCapacity', value: 1.02 }; }
-        else { name = `Customer Demand ${i}`; effect = { kind: 'npcPriceFactor', value: 1.005 }; }
+        // stronger effects: better discounts / bonuses / inventory / npc demand / money multiplier
+        if (typeRoll === 0) { name = `Buy Discount (Twinkie) ${i}`; effect = { kind: 'buyTwinkieMultiplier', value: 0.97 }; }
+        else if (typeRoll === 1) { name = `Sell Bonus (Twinkie) ${i}`; effect = { kind: 'sellTwinkieMultiplier', value: 1.06 }; }
+        else if (typeRoll === 2) { name = `Buy Discount (Pepsi) ${i}`; effect = { kind: 'buyPepsiMultiplier', value: 0.97 }; }
+        else if (typeRoll === 3) { name = `Sell Bonus (Pepsi) ${i}`; effect = { kind: 'sellPepsiMultiplier', value: 1.06 }; }
+        else if (typeRoll === 4) { name = `Inventory Expansion ${i}`; effect = { kind: 'inventoryCapacity', value: 1.05 }; }
+        else if (typeRoll === 5) { name = `Customer Demand ${i}`; effect = { kind: 'npcPriceFactor', value: 1.03 }; }
+        else { name = `Money Multiplier ${i}`; effect = { kind: 'moneyMultiplier', value: 1.02 }; }
         upgrades.push({ id: i, name, cost, effect, purchased: false });
     }
     // add 5 map expansions as special upgrades with higher costs and tier unlocking
@@ -170,8 +174,12 @@
         else if (e.kind === 'sellPepsiMultiplier') modifiers.sellPepsiMultiplier *= e.value;
         else if (e.kind === 'inventoryCapacity') modifiers.inventoryCapacity = Math.floor(modifiers.inventoryCapacity * e.value);
         else if (e.kind === 'npcPriceFactor') {
-            // boost NPC price factor globally (affects how much they pay)
+            // boost NPC base multiplier (affects how much they pay when spawned and existing NPCs)
+            modifiers.npcBaseMultiplier *= e.value;
             for (const n of npcs) n.priceFactor *= e.value;
+        }
+        else if (e.kind === 'moneyMultiplier') {
+            modifiers.moneyMultiplier *= e.value;
         }
         else if (e.kind === 'mapExpansion') {
             mapExpansionsPurchased += 1;
@@ -185,16 +193,12 @@
     }
 
     function spawnExtraNPC() {
-        const npc = {
-            x: Math.random()*(W-40)+20,
-            y: Math.random()*(H-40)+20,
-            w: 14, h: 22,
-            vx: (Math.random()-0.5)*0.7,
-            vy: (Math.random()-0.5)*0.7,
-            wants: Math.random() < Math.min(0.8, 0.45 + unlockedTier*0.05) ? 'twinkie' : 'pepsi',
-            priceFactor: 0.95 + Math.random()*0.5 + unlockedTier*0.02
-        };
-        npcs.push(npc);
+        // spawn a replacement NPC using createNPC; adjust wants/price based on unlockedTier
+        const newNpc = createNPC();
+        // slightly bias wants towards twinkies at higher tiers
+        if (Math.random() < Math.min(0.85, 0.45 + unlockedTier*0.05)) newNpc.wants = 'twinkie';
+        newNpc.priceFactor = 0.95 + Math.random()*0.5 + unlockedTier*0.02;
+        npcs.push(newNpc);
     }
 
     // Override buy/sell functions to use modifiers and capacity
@@ -272,7 +276,7 @@
 
     // NPCs (people to sell to)
     const npcs = [];
-    const NPC_COUNT = 10;
+    const NPC_COUNT = 30;
 
     // Input
     const keys = {};
@@ -289,19 +293,27 @@
         logEl.prepend(p);
     }
 
+    function createNPC() {
+        const wants = Math.random() < 0.6 ? 'twinkie' : (Math.random() < 0.7 ? 'pepsi' : 'either');
+        const basePriceFactor = 0.9 + Math.random()*0.5; // how much they'll pay vs sell price
+        const deathThreshold = Math.max(2, 5 + Math.floor(Math.random()*3) - Math.floor(unlockedTier/2));
+        return {
+            x: Math.random()*(W-40)+20,
+            y: Math.random()*(H-40)+20,
+            w: 14, h: 22,
+            vx: (Math.random()-0.5)*0.7,
+            vy: (Math.random()-0.5)*0.7,
+            wants,
+            // priceFactor accounts for global NPC multiplier and tier
+            priceFactor: basePriceFactor * modifiers.npcBaseMultiplier * (1 + unlockedTier * 0.02),
+            twinkiesReceived: 0,
+            pepsiReceived: 0,
+            deathThreshold
+        };
+    }
+
     function spawnNPCs() {
-        for (let i=0;i<NPC_COUNT;i++) {
-            const npc = {
-                x: Math.random()*(W-40)+20,
-                y: Math.random()*(H-40)+20,
-                w: 14, h: 22,
-                vx: (Math.random()-0.5)*0.7,
-                vy: (Math.random()-0.5)*0.7,
-                wants: Math.random() < 0.6 ? 'twinkie' : (Math.random() < 0.7 ? 'pepsi' : 'either'),
-                priceFactor: 0.9 + Math.random()*0.5 // how much they'll pay vs sell price
-            };
-            npcs.push(npc);
-        }
+        for (let i=0;i<NPC_COUNT;i++) npcs.push(createNPC());
     }
 
     spawnNPCs();
@@ -406,17 +418,11 @@
     // Interaction logic when E pressed
     function tryInteract() {
         if (rectIntersect(player, store)) {
-            // buy twinkie
-            if (money >= prices.buyTwinkie) {
-                money -= prices.buyTwinkie; twinkies += 1; updateUI(); addLog('Bought 1 Twinkie for $' + prices.buyTwinkie.toFixed(2));
-            } else addLog('Not enough money to buy a Twinkie.');
+            buyTwinkies();
             return;
         }
         if (rectIntersect(player, alley)) {
-            // buy pepsi
-            if (money >= prices.buyPepsi) {
-                money -= prices.buyPepsi; pepsi += 1; updateUI(); addLog('Bought 1 Pepsi for $' + prices.buyPepsi.toFixed(2));
-            } else addLog('Not enough money to buy a Pepsi.');
+            buyPepsi();
             return;
         }
         // check NPCs
@@ -425,16 +431,29 @@
             if (pointRect(player.x + player.w/2, player.y + player.h/2, n.x - n.w/2, n.y - n.h, n.w, n.h)) {
                 // attempt sale
                 if ((n.wants === 'twinkie' || n.wants === 'either') && twinkies > 0) {
-                    const price = prices.sellTwinkie * n.priceFactor;
-                    money += price; twinkies -= 1; updateUI(); addLog('Sold 1 Twinkie to person for $' + price.toFixed(2));
-                    // person happy => may leave or change wants
-                    if (Math.random() < 0.25) npcs.splice(i,1);
+                    const price = basePrices.sellTwinkie * modifiers.sellTwinkieMultiplier * n.priceFactor * modifiers.moneyMultiplier;
+                    money += price; twinkies -= 1; n.twinkiesReceived = (n.twinkiesReceived || 0) + 1; updateUI(); addLog('Sold 1 Twinkie to person for $' + price.toFixed(2));
+                    // if the person has consumed too many items they die; spawn replacement
+                    if ((n.twinkiesReceived + (n.pepsiReceived || 0)) >= (n.deathThreshold || 6)) {
+                        addLog('Person overloaded and died! A replacement appears.');
+                        npcs.splice(i,1);
+                        spawnExtraNPC();
+                        return;
+                    }
+                    // otherwise small chance they leave
+                    if (Math.random() < 0.12) { npcs.splice(i,1); spawnExtraNPC(); }
                     return;
                 }
                 if ((n.wants === 'pepsi' || n.wants === 'either') && pepsi > 0) {
-                    const price = prices.sellPepsi * n.priceFactor;
-                    money += price; pepsi -= 1; updateUI(); addLog('Sold 1 Pepsi to person for $' + price.toFixed(2));
-                    if (Math.random() < 0.35) npcs.splice(i,1);
+                    const price = basePrices.sellPepsi * modifiers.sellPepsiMultiplier * n.priceFactor * modifiers.moneyMultiplier;
+                    money += price; pepsi -= 1; n.pepsiReceived = (n.pepsiReceived || 0) + 1; updateUI(); addLog('Sold 1 Pepsi to person for $' + price.toFixed(2));
+                    if ((n.twinkiesReceived || 0) + n.pepsiReceived >= (n.deathThreshold || 6)) {
+                        addLog('Person overloaded and died! A replacement appears.');
+                        npcs.splice(i,1);
+                        spawnExtraNPC();
+                        return;
+                    }
+                    if (Math.random() < 0.16) { npcs.splice(i,1); spawnExtraNPC(); }
                     return;
                 }
                 // if nothing to sell
@@ -449,6 +468,10 @@
         moneyEl.textContent = money.toFixed(2);
         twEl.textContent = twinkies;
         peEl.textContent = pepsi;
+        // if upgrade UI elements exist, update them too
+        const upc = document.getElementById('upgradesCount'); if (upc) upc.textContent = purchasedUpgrades.size;
+        const mpc = document.getElementById('mapCount'); if (mpc) mpc.textContent = mapExpansionsPurchased;
+        const tierEl = document.getElementById('tier'); if (tierEl) tierEl.textContent = unlockedTier;
     }
 
     // Keyboard
